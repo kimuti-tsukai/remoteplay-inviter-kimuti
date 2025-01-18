@@ -146,74 +146,83 @@ async fn main() -> Result<()> {
         }
 
         loop {
-            #[allow(clippy::redundant_closure_call)]
-            let result: Result<ResultConfig> = (async || {
-                // Display the reconnection message
-                if reconnect {
-                    console::println!("↪ Reconnecting to the server...");
-                }
-
-                // Create a WebSocket client
-                let connect_result = timeout(Duration::from_secs(10), connect_async(&url))
-                    .await
-                    .context("Connection timed out to the server")?;
-                let ws_stream = match connect_result {
-                    Ok((ws_stream, _)) => ws_stream,
-                    Err(err) => {
-                        handle_ws_error(err)?;
-                        // If OK is returned, break the loop and exit
-                        return Ok(ResultConfig::Break);
+            let result: Result<ResultConfig> = {
+                let retry_sec = Mutex::new(&mut retry_sec);
+                let handler = Mutex::new(&mut handler);
+                #[allow(clippy::redundant_closure_call)]
+                (|| async {
+                    // Display the reconnection message
+                    if reconnect {
+                        console::println!("↪ Reconnecting to the server...");
                     }
-                };
 
-                // Stream and sink for communicating with the server
-                let (mut write, mut read) = ws_stream.split();
-
-                // Display the reconnection message
-                if reconnect {
-                    console::println!("✓ Reconnected!");
-                } else {
-                    console::println!("✓ Connected to the server!");
-                }
-
-                // Loop to process messages received from the server
-                while let Some(message) = timeout(Duration::from_secs(60), read.next())
-                    .await
-                    .context("Connection timed out")?
-                {
-                    // Process each message
-                    match message.context("Failed to receive message from the server")? {
-                        Message::Close(_) => break,
-                        Message::Ping(ping) => {
-                            // Send a Pong message
-                            write
-                                .send(Message::Pong(ping))
-                                .await
-                                .context("Failed to send pong message to the server")?;
-
-                            // Reset the retry seconds
-                            retry_sec.reset();
+                    // Create a WebSocket client
+                    let connect_result = timeout(Duration::from_secs(10), connect_async(&url))
+                        .await
+                        .context("Connection timed out to the server")?;
+                    let ws_stream = match connect_result {
+                        Ok((ws_stream, _)) => ws_stream,
+                        Err(err) => {
+                            handle_ws_error(err)?;
+                            // If OK is returned, break the loop and exit
+                            return Ok(ResultConfig::Break);
                         }
-                        Message::Text(text) => {
-                            // Parse the JSON data
-                            let msg: ServerMessage = serde_json::from_str(&text)
-                                .context("Failed to deserialize JSON message from the server")?;
+                    };
 
-                            // Process the message
-                            if handler.handle_server_message(msg, &mut write).await? {
-                                // If the exit flag is set, break the loop and exit
-                                return Ok(ResultConfig::Break);
+                    // Stream and sink for communicating with the server
+                    let (mut write, mut read) = ws_stream.split();
+
+                    // Display the reconnection message
+                    if reconnect {
+                        console::println!("✓ Reconnected!");
+                    } else {
+                        console::println!("✓ Connected to the server!");
+                    }
+
+                    // Loop to process messages received from the server
+                    while let Some(message) = timeout(Duration::from_secs(60), read.next())
+                        .await
+                        .context("Connection timed out")?
+                    {
+                        // Process each message
+                        match message.context("Failed to receive message from the server")? {
+                            Message::Close(_) => break,
+                            Message::Ping(ping) => {
+                                // Send a Pong message
+                                write
+                                    .send(Message::Pong(ping))
+                                    .await
+                                    .context("Failed to send pong message to the server")?;
+
+                                // Reset the retry seconds
+                                retry_sec.lock().await.reset();
                             }
+                            Message::Text(text) => {
+                                // Parse the JSON data
+                                let msg: ServerMessage = serde_json::from_str(&text).context(
+                                    "Failed to deserialize JSON message from the server",
+                                )?;
 
-                            // Reset the retry seconds
-                            retry_sec.reset();
+                                // Process the message
+                                if handler.lock().await.handle_server_message(msg, &mut write).await? {
+                                    // If the exit flag is set, break the loop and exit
+                                    return Ok(ResultConfig::Break);
+                                }
+
+                                // Reset the retry seconds
+                                retry_sec.lock().await.reset();
+                            }
+                            _ => (),
                         }
-                        _ => (),
                     }
-                }
 
-                Ok(ResultConfig::Success)
-            })().await;
+                    Ok(ResultConfig::Success)
+                })()
+                .await
+            };
+            if let Ok(ResultConfig::Break) = result {
+                break 'main;
+            }
             if let Err(err) = result {
                 console::eprintln!("☓ {}", err);
             }
