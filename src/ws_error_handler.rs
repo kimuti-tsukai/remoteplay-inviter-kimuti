@@ -7,7 +7,7 @@ pub fn handle_ws_error(err: WsError) -> Result<()> {
     match err {
         // In case of Bad Request
         WsError::Http(res) if res.status() == 400 => {
-            let result: Result<()> = try {
+            let result: Result<()> = (|| {
                 // Get the response body
                 let header = res
                     .headers()
@@ -57,7 +57,9 @@ pub fn handle_ws_error(err: WsError) -> Result<()> {
                         }
                     }
                 }
-            };
+
+                Ok(())
+            })();
 
             if let Err(err) = result {
                 // If parsing fails

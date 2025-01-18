@@ -1,5 +1,3 @@
-#![feature(try_blocks)]
-
 use anyhow::{Context as _, Result};
 use dotenvy_macro::dotenv;
 use futures::SinkExt;
@@ -101,7 +99,7 @@ async fn main() -> Result<()> {
         let mut retry_sec = RetrySec::new();
 
         // URL to connect to
-        let result: Result<String> = try {
+        let result: Result<String> = (|| {
             // Read the endpoint configuration file
             let endpoint_config = config::read_endpoint_config()?;
 
@@ -131,8 +129,9 @@ async fn main() -> Result<()> {
                 ))
                 .build()
                 .context("Failed to build URL")?;
-            uri.to_string()
-        };
+            Ok(uri.to_string())
+        })();
+
         let url = match result {
             Ok(url) => url,
             Err(err) => {
@@ -141,8 +140,14 @@ async fn main() -> Result<()> {
             }
         };
 
+        enum ResultConfig {
+            Success,
+            Break,
+        }
+
         loop {
-            let result: Result<()> = try {
+            #[allow(clippy::redundant_closure_call)]
+            let result: Result<ResultConfig> = (async || {
                 // Display the reconnection message
                 if reconnect {
                     console::println!("↪ Reconnecting to the server...");
@@ -157,7 +162,7 @@ async fn main() -> Result<()> {
                     Err(err) => {
                         handle_ws_error(err)?;
                         // If OK is returned, break the loop and exit
-                        break 'main;
+                        return Ok(ResultConfig::Break);
                     }
                 };
 
@@ -197,7 +202,7 @@ async fn main() -> Result<()> {
                             // Process the message
                             if handler.handle_server_message(msg, &mut write).await? {
                                 // If the exit flag is set, break the loop and exit
-                                break 'main;
+                                return Ok(ResultConfig::Break);
                             }
 
                             // Reset the retry seconds
@@ -206,7 +211,9 @@ async fn main() -> Result<()> {
                         _ => (),
                     }
                 }
-            };
+
+                Ok(ResultConfig::Success)
+            })().await;
             if let Err(err) = result {
                 console::eprintln!("☓ {}", err);
             }
